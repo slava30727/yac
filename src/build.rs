@@ -153,6 +153,11 @@ impl BuildCfg {
 }
 
 async fn run_build(cfg: BuildCfg) -> Result<ExitStatus, Box<dyn Error>> {
+    const WARNING_FLAGS: &[&str] = &[
+        "-Wall", "-Wextra", "-Wdouble-promotion", "-Wformat-overflow=2",
+        "-Wformat-nonliteral", "-Wformat-security",
+    ];
+
     if !src_files_updated(cfg.release).await {
         return Ok(ExitStatus::default());
     }
@@ -164,7 +169,7 @@ async fn run_build(cfg: BuildCfg) -> Result<ExitStatus, Box<dyn Error>> {
     }
 
     let status = Command::new("gcc")
-        .args(["-Wall", "-Wextra", "-Wpedantic"])
+        .args(WARNING_FLAGS)
         .arg("src/*.c")
         .arg(if cfg.release { "-O3" } else { "-g" })
         .arg("-o")

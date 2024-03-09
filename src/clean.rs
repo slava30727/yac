@@ -8,7 +8,7 @@ pub async fn clean() -> Result<(), Box<dyn Error>> {
         &tokio::fs::read_to_string("Yac.toml").await?
     )?;
 
-    print_aligned("Cleaning", &format!("package {} artifacts", yac_toml.package.name))?;
+    print_aligned("Cleaning", &format!("package `{}`'s artifacts", yac_toml.package.name))?;
 
     Command::new("rm")
         .args(["-rf", "target"])

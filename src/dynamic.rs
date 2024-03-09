@@ -1,4 +1,4 @@
-use std::{ffi::{CStr, OsStr, OsString}, path::Path};
+use std::{ffi::{CStr, OsStr, OsString}, path::Path, process::ExitStatus};
 
 
 
@@ -102,14 +102,14 @@ type BuilderNewFn = unsafe extern "C" fn() -> RawBuild;
 type BuilderFreeFn = unsafe extern "C" fn(*mut RawBuild);
 
 pub struct Builder {
-    lib: libloading::Library,
+    _lib: libloading::Library,
     build_fn: libloading::Symbol<'static, BuilderBuildFn>,
     new_fn: libloading::Symbol<'static, BuilderNewFn>,
     free_fn: libloading::Symbol<'static, BuilderFreeFn>,
 }
 
 impl Builder {
-    pub fn compile(build: impl AsRef<Path>, out: impl AsRef<Path>) {
+    pub fn compile(build: impl AsRef<Path>, out: impl AsRef<Path>) -> ExitStatus {
         use std::process::Command;
 
         let src = r"D:\Svyatoslav\Programs\yac\src";
@@ -133,17 +133,17 @@ impl Builder {
             .spawn()
             .unwrap()
             .wait()
-            .unwrap();
+            .unwrap()
     }
 
     pub fn new(lib_path: impl AsRef<Path>) -> Result<Self, BuilderCreationError> {
-        use libloading::{Library, Symbol};
+        use libloading::Library;
 
         unsafe {
             let lib = Library::new(lib_path.as_ref())?;
 
-            /// Transmuting to cast out the 'lib lifetime to 'static.
-            /// It is safe, because lib lives as long as func.
+            // Transmuting to cast out the 'lib lifetime to 'static.
+            // It is safe, because lib lives as long as func.
 
             let func = std::mem::transmute(
                 lib.get::<BuilderBuildFn>(b"build")?,
@@ -157,7 +157,7 @@ impl Builder {
                 lib.get::<BuilderFreeFn>(b"Build_free")?,
             );
 
-            Ok(Self { lib, build_fn: func, new_fn, free_fn })
+            Ok(Self { _lib: lib, build_fn: func, new_fn, free_fn })
         }
     }
 }

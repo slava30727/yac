@@ -1,5 +1,5 @@
 use std::error::Error;
-use crate::package::YacToml;
+use crate::{package::YacToml, prettify::{print_aligned, error}};
 
 
 
@@ -13,13 +13,6 @@ int main(void) {
 }
 "#;
 
-const BUILD_FILE_DEFAULT: &str = r#"#include <yac/lib.h>
-
-void build(Build* build) {
-    Build_add_source_files(build, "src/*.c");
-}
-"#;
-
 const GITIGNORE_FILE_DEFAULT: &str = "/target\n";
 
 const CLANGD_FILE_DEFAULT: &str = r#"CompileFlags:
@@ -29,13 +22,26 @@ const CLANGD_FILE_DEFAULT: &str = r#"CompileFlags:
 
 
 
-pub async fn new(name: String) -> Result<(), Box<dyn Error>> {
+pub async fn new(name: &str) -> Result<(), Box<dyn Error>> {
     use std::{fs, path::PathBuf, process::Command};
+    use path_absolutize::Absolutize;
 
-    let prj_dir = PathBuf::from(&name);
+    let prj_dir = PathBuf::from(name);
+
+    if prj_dir.exists() {
+        // TODO: fix canonicalize strange behavior
+        // TODO: add `yac init`
+        error(
+            &format!("destination `{}` already exists", prj_dir.absolutize()?.to_str().unwrap()),
+            Some("Use `yac init` to initialize the directory"),
+        )?;
+
+        return Ok(());
+    }
+
     fs::create_dir_all(prj_dir.join("src"))?;
 
-    let git_init = Command::new("git")
+    Command::new("git")
         .current_dir(&prj_dir)
         .arg("init")
         .stdout(std::process::Stdio::null())
@@ -53,6 +59,11 @@ pub async fn new(name: String) -> Result<(), Box<dyn Error>> {
         tokio::fs::write(prj_dir.join("src/main.c"), MAIN_FILE_DEFAULT),
         tokio::fs::write(prj_dir.join(".clangd"), CLANGD_FILE_DEFAULT),
     }?;
+
+    print_aligned(
+        "Created",
+        &format!("binary (application) `{name}` package"),
+    )?;
 
     Ok(())
 }

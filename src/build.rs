@@ -1,117 +1,176 @@
-use crate::dynamic::{Build, Builder, CBuild};
+use crate::dynamic::{Build, Builder, BuilderCreationError, CBuild};
 use crate::package::*;
 use crate::update::*;
-use std::ffi::OsString;
-use std::{path::{Path, PathBuf}, fs, process::Command, error::Error};
+use std::{path::{Path, PathBuf}, fs, process::{Command, ExitStatus}, error::Error};
 
 
 
-pub async fn build() -> Result<(), Box<dyn Error>> {
+pub async fn build(release: bool) -> Result<ExitStatus, Box<dyn Error>> {
+    use path_absolutize::Absolutize;
+    use crate::prettify::print_aligned;
+    use std::time::Instant;
+
     const TARGET: &str = "target";
 
     if !Path::new(TARGET).exists() {
-        fs::create_dir(TARGET);
+        fs::create_dir(TARGET)?;
     }
-
-    build_impl(get_build().await?.into()).await;
-
-    Ok(())
-}
-
-pub async fn get_build() -> Result<Build, Box<dyn Error>> {
-    const YAC_TOML: &str = "Yac.toml";
-    const BUILD: &str = "build.c";
 
     let yac_toml = toml::from_str::<YacToml>(
-        &tokio::fs::read_to_string(YAC_TOML).await?,
+        &tokio::fs::read_to_string("Yac.toml").await?
     )?;
 
-    let mut build_values = if Path::new(BUILD).exists() {
-        if build_file_updated().await {
-            Builder::compile("build.c", "target/build.dll");
-        }
+    let src_path = std::env::current_dir()?;
 
-        let api = Builder::new("target/build.dll")?;
-        let mut cbuild = CBuild::new(api);
-        cbuild.build();
-        
-        Build::from(&cbuild)
-    } else {
-        Build {
-            src_files: vec![OsString::from("src/*.c")],
-            executable_name: yac_toml.package.name.as_str().into(),
-            link_directories: vec![],
-            enabled_flags: vec![OsString::from("DEBUG")],
-        }
+    print_aligned(
+        "Compiling",
+        &format!(
+            "{name} v{version} ({path})",
+            name = yac_toml.package.name,
+            version = yac_toml.package.version,
+            path = src_path.absolutize()?.to_str().unwrap(),
+        ),
+    )?;
+
+    let time = Instant::now();
+
+    let build_status = compile_build_script().await.unwrap_or_default();
+
+    if !build_status.success() {
+        YacUpdate::mark_build_error().await?;
+
+        crate::prettify::error(
+            &format!(
+                "could not compile `{}`'s build script due to previous erorr(s)",
+                yac_toml.package.name,
+            ),
+            None,
+        )?;
+
+        return Ok(build_status);
+    }
+
+    let build = run_build_script(&yac_toml).await?;
+
+    let build_cfg = match build {
+        Some(build) => BuildCfg::from_dynamic(build, &yac_toml.package.name, release),
+        None => BuildCfg {
+            target: PathBuf::from(TARGET),
+            src_files: vec![],
+            executable_name: PathBuf::from(&yac_toml.package.name),
+            package_name: yac_toml.package.name.clone(),
+            release,
+        },
     };
 
-    if build_values.executable_name.is_empty() {
-        build_values.executable_name = yac_toml.package.name.into();
+    let build_status = run_build(build_cfg).await?;
+
+    let time = Instant::now().duration_since(time);
+
+    if build_status.success() {
+        print_aligned(
+            "Finished",
+            &format!(
+                "`{mode}` profile [{profile}] target(s) in {time:.2}s",
+                mode = if release { "release" } else { "debug" },
+                profile = if release { "optimized" } else { "unoptimized + debuginfo" },
+                time = time.as_secs_f32(),
+            ),
+        )?;
+    } else {
+        YacUpdate::mark_src_error().await?;
+
+        crate::prettify::error(
+            &format!("could not compile `{}` due to previous erorr(s)", yac_toml.package.name),
+            None,
+        )?;
+
+        return Ok(build_status);
     }
 
-    if !build_values.src_files.contains(&"src/*.c".into()) {
-        build_values.src_files.push(OsString::from("src/*.c"));
+    Ok(build_status)
+}
+
+pub async fn compile_build_script() -> Option<ExitStatus> {
+    if !Path::new("build.c").exists() {
+        return None;
     }
 
-    Ok(build_values)
+    Some(if build_file_updated().await {
+        Builder::compile("build.c", "target/build.dll")
+    } else {
+        ExitStatus::default()
+    })
+}
+
+pub async fn run_build_script(yac_toml: &YacToml)
+    -> Result<Option<Build>, BuilderCreationError>
+{
+    use std::ffi::OsString;
+
+    if !Path::new("build.c").exists() {
+        return Ok(None);
+    }
+
+    let api = Builder::new("target/build.dll")?;
+    let mut cbuild = CBuild::new(api);
+    cbuild.build();
+
+    let mut build = Build::from(&cbuild);
+
+    if build.executable_name.is_empty() {
+        build.executable_name = OsString::from(&yac_toml.package.name);
+    }
+
+    Ok(Some(build))
 }
 
 #[derive(Clone, Debug)]
 pub struct BuildCfg {
     target: PathBuf,
     src_files: Vec<PathBuf>,
-    out_file: PathBuf,
+    executable_name: PathBuf,
+    package_name: String,
     release: bool,
 }
 
-impl From<Build> for BuildCfg {
-    fn from(value: Build) -> Self {
+impl BuildCfg {
+    pub fn from_dynamic(
+        build: Build, package_name: impl Into<String>, release: bool,
+    ) -> Self {
         let target = PathBuf::from("target");
-        let src_files = value.src_files.into_iter().map(PathBuf::from).collect();
-        let out_file = PathBuf::from(value.executable_name);
-        let release = false;
+        let src_files = build.src_files.into_iter().map(PathBuf::from).collect();
+        let out_file = PathBuf::from(build.executable_name);
 
-        Self { target, src_files, out_file, release }
+        Self {
+            target,
+            src_files,
+            executable_name: out_file,
+            release,
+            package_name: package_name.into(),
+        }
     }
 }
 
-async fn build_impl(cfg: BuildCfg) {
-    let target = Path::new("target");
-
-    if !target.exists() {
-        fs::create_dir("target").unwrap();
+async fn run_build(cfg: BuildCfg) -> Result<ExitStatus, Box<dyn Error>> {
+    if !src_files_updated(cfg.release).await {
+        return Ok(ExitStatus::default());
     }
 
-    if !src_files_updated().await {
-        return;
+    let app_path = cfg.target.join(if cfg.release { "release" } else { "debug" });
+
+    if !app_path.exists() {
+        fs::create_dir_all(&app_path)?;
     }
 
-    let exe_path = if cfg.release {
-        let path = target.join("release");
+    let status = Command::new("gcc")
+        .args(["-Wall", "-Wextra", "-Wpedantic"])
+        .arg("src/*.c")
+        .arg(if cfg.release { "-O3" } else { "-g" })
+        .arg("-o")
+        .arg(app_path.join(cfg.executable_name).with_extension("exe"))
+        .spawn()?
+        .wait()?;
 
-        if !path.exists() {
-            fs::create_dir(&path).unwrap();
-        }
-
-        path
-    } else {
-        let path = target.join("debug");
-
-        if !path.exists() {
-            fs::create_dir(&path).unwrap();
-        }
-
-        path
-    };
-
-    println!("\t[INFO : Building project]");
-
-    Command::new("gcc")
-        .args(cfg.src_files)
-        .args(["-g", "-o"])
-        .arg(exe_path.join(cfg.out_file))
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
+    Ok(status)
 }

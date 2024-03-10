@@ -1,4 +1,4 @@
-use crate::{build, package::YacToml, prettify::print_aligned};
+use crate::{build, yac_toml::YacToml, prettify::print_aligned};
 use std::{error::Error, path::Path, process::Command};
 
 
@@ -12,9 +12,8 @@ pub async fn run(release: bool) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let yac_toml = toml::from_str::<YacToml>(
-        &tokio::fs::read_to_string("Yac.toml").await?,
-    )?;
+    let yac_toml = YacToml::read("./").await?
+        .expect("build success means that Yac.toml already in use");
 
     let executable_name = yac_toml.package.name;
     let mut executable_path = Path::new(TARGET)

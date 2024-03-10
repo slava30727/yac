@@ -1,10 +1,11 @@
 #![feature(decl_macro)]
+#![recursion_limit = "32"]
 
 
 
 pub mod dynamic;
 pub mod new;
-pub mod package;
+pub mod yac_toml;
 pub mod build;
 pub mod run;
 pub mod clean;

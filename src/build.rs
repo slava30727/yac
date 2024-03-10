@@ -1,5 +1,5 @@
 use crate::dynamic::{Build, Builder, BuilderCreationError, CBuild};
-use crate::package::*;
+use crate::yac_toml::*;
 use crate::update::*;
 use std::{path::{Path, PathBuf}, fs, process::{Command, ExitStatus}, error::Error};
 
@@ -7,18 +7,23 @@ use std::{path::{Path, PathBuf}, fs, process::{Command, ExitStatus}, error::Erro
 
 pub async fn build(release: bool) -> Result<ExitStatus, Box<dyn Error>> {
     use path_absolutize::Absolutize;
-    use crate::prettify::print_aligned;
+    use crate::prettify::{print_aligned, error};
     use std::time::Instant;
 
     const TARGET: &str = "target";
 
+    let Some(yac_toml) = YacToml::read("./").await? else {
+        error(
+            "failed to locate project in current directory",
+            Some("Consider to create a new project: `yac new --name <PROJECT_NAME>`"),
+        )?;
+
+        return Ok(ExitStatus::default());
+    };
+
     if !Path::new(TARGET).exists() {
         fs::create_dir(TARGET)?;
     }
-
-    let yac_toml = toml::from_str::<YacToml>(
-        &tokio::fs::read_to_string("Yac.toml").await?
-    )?;
 
     let src_path = std::env::current_dir()?;
 
@@ -53,12 +58,11 @@ pub async fn build(release: bool) -> Result<ExitStatus, Box<dyn Error>> {
     let build = run_build_script(&yac_toml).await?;
 
     let build_cfg = match build {
-        Some(build) => BuildCfg::from_dynamic(build, &yac_toml.package.name, release),
+        Some(build) => BuildCfg::from_dynamic(build, &yac_toml, release),
         None => BuildCfg {
             target: PathBuf::from(TARGET),
-            src_files: vec![],
             executable_name: PathBuf::from(&yac_toml.package.name),
-            package_name: yac_toml.package.name.clone(),
+            yac_toml: &yac_toml,
             release,
         },
     };
@@ -126,33 +130,30 @@ pub async fn run_build_script(yac_toml: &YacToml)
 }
 
 #[derive(Clone, Debug)]
-pub struct BuildCfg {
+pub struct BuildCfg<'toml> {
     target: PathBuf,
-    src_files: Vec<PathBuf>,
     executable_name: PathBuf,
-    package_name: String,
     release: bool,
+    yac_toml: &'toml YacToml,
 }
 
-impl BuildCfg {
+impl<'toml> BuildCfg<'toml> {
     pub fn from_dynamic(
-        build: Build, package_name: impl Into<String>, release: bool,
+        build: Build, yac_toml: &'toml YacToml, release: bool,
     ) -> Self {
         let target = PathBuf::from("target");
-        let src_files = build.src_files.into_iter().map(PathBuf::from).collect();
         let out_file = PathBuf::from(build.executable_name);
 
         Self {
             target,
-            src_files,
             executable_name: out_file,
             release,
-            package_name: package_name.into(),
+            yac_toml,
         }
     }
 }
 
-async fn run_build(cfg: BuildCfg) -> Result<ExitStatus, Box<dyn Error>> {
+async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
     const WARNING_FLAGS: &[&str] = &[
         "-Wall", "-Wextra", "-Wdouble-promotion", "-Wformat-overflow=2",
         "-Wformat-nonliteral", "-Wformat-security",
@@ -167,6 +168,8 @@ async fn run_build(cfg: BuildCfg) -> Result<ExitStatus, Box<dyn Error>> {
     if !app_path.exists() {
         fs::create_dir_all(&app_path)?;
     }
+
+    let _artifacts_dir = app_path.join(&cfg.yac_toml.package.name);
 
     let status = Command::new("gcc")
         .args(WARNING_FLAGS)

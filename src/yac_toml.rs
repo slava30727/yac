@@ -7,6 +7,19 @@ use serde::{Serialize, Deserialize};
 pub struct Package {
     pub name: String,
     pub version: String,
+    #[serde(rename = "type")]
+    pub ty: PackageType,
+}
+
+
+
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageType {
+    #[default]
+    Executable,
+    StaticLib,
+    DynamicLib,
 }
 
 
@@ -14,26 +27,29 @@ pub struct Package {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Dependency {
     pub version: String,
+    #[serde(flatten)]
     pub location: Location,
-    pub r#type: Type,
+    #[serde(rename = "type", default)]
+    pub ty: Type,
 }
 
 
 
-#[allow(non_camel_case_types)]
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Type {
-    yac,
-    cmake,
+    #[default]
+    Yac,
+    Cmake,
 }
 
 
 
-#[allow(non_camel_case_types)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", untagged)]
 pub enum Location {
-    path(String),
-    link(String),
+    Path { path: String },
+    Link { link: String },
 }
 
 
@@ -45,11 +61,12 @@ pub struct YacToml {
 }
 
 impl YacToml {
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, package_type: PackageType) -> Self {
         Self {
             package: Package {
                 name: name.into(),
                 version: String::from("0.1.0"),
+                ty: package_type,
             },
             dependencies: HashMap::default(),
         }
@@ -82,35 +99,47 @@ pub enum YacTomlReadError {
 
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Target {
+    pub yac_toml: YacToml,
+    pub description: Dependency,
+}
+
+
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct YacLock {
-    pub package: Vec<(String, Dependency)>,
+    pub package: Vec<Target>,
 }
 
 impl YacLock {
-    pub fn linearize_here(
+    pub fn linearize_from(
         yac_toml: &YacToml, location: impl AsRef<Path>,
     ) -> Result<Self, YacLockLinearizeError> {
         const RECURSION_LIMIT: usize = 256;
 
         let mut result = vec![];
+        let cwd = std::env::current_dir().unwrap();
 
-        Self::linearize_here_recursive(
-            yac_toml, location, &mut result, &mut vec![], RECURSION_LIMIT,
+        Self::linearize_from_recursive(
+            yac_toml.clone(), location, &cwd, &mut result, &mut vec![], RECURSION_LIMIT,
         )?;
 
         Ok(YacLock { package: result })
     }
 
-    fn linearize_here_recursive(
-        yac_toml: &YacToml, location: impl AsRef<Path>,
-        dependancies: &mut Vec<(String, Dependency)>, used: &mut Vec<String>,
+    fn linearize_from_recursive(
+        yac_toml: YacToml, location: impl AsRef<Path>, cwd: impl AsRef<Path>,
+        targets: &mut Vec<Target>, used: &mut Vec<String>,
         forward_depth: usize,
     ) -> Result<(), YacLockLinearizeError> {
+        use relative_path::RelativePath;
+
         if forward_depth == 0 {
             return Err(YacLockLinearizeError::RecursionLimit);
         }
 
         let location = location.as_ref();
+        let cwd = cwd.as_ref();
 
         if used.contains(&yac_toml.package.name) {
             return Ok(());
@@ -118,30 +147,74 @@ impl YacLock {
 
         used.push(yac_toml.package.name.clone());
 
+        let pretty_location = RelativePath::from_path(
+            &location.to_str().unwrap().replace('\\', "/"),
+        ).unwrap().normalize().into_string();
+
         let self_dependancy = Dependency {
             version: yac_toml.package.version.clone(),
-            location: Location::path(location.to_str().unwrap().to_owned()),
-            r#type: Type::yac,
+            location: Location::Path { path: pretty_location.clone() },
+            ty: Type::Yac,
         };
 
         for dependancy in yac_toml.dependencies.values() {
-            let Location::path(ref location) = dependancy.location else {
-                todo!("Location::link is not supported yet");
+            let Location::Path { path: ref relative_location } = dependancy.location else {
+                todo!("Location::Link is not supported yet");
             };
 
+            let absolute_location = location.join(relative_location);
+
             let yac_toml = toml::from_str::<YacToml>(
-                &std::fs::read_to_string(Path::new(location).join("Yac.toml"))?
+                &std::fs::read_to_string(absolute_location.join("Yac.toml"))?
             )?;
 
-            Self::linearize_here_recursive(
-                &yac_toml, location, dependancies, used, forward_depth - 1,
+            Self::linearize_from_recursive(
+                yac_toml, &absolute_location, cwd, targets, used, forward_depth - 1,
             )?;
         }
 
-        dependancies.push((yac_toml.package.name.clone(), self_dependancy));
+        if !pretty_location.is_empty() {
+            targets.push(Target { yac_toml, description: self_dependancy });
+        }
         
         Ok(())
     }
+
+    pub async fn read(location: impl AsRef<Path>) -> Result<Option<Self>, YacLockError> {
+        let location = location.as_ref().join("Yac.lock");
+
+        if !location.exists() {
+            return Ok(None);
+        }
+
+        let yac_lock = toml::from_str::<Self>(
+            &tokio::fs::read_to_string(&location).await?,
+        )?;
+
+        Ok(Some(yac_lock))
+    }
+
+    pub async fn write(&self, location: impl AsRef<Path>) -> Result<(), YacLockError> {
+        let location = location.as_ref().join("Yac.lock");
+
+        tokio::fs::write(&location, &toml::to_string(self)?).await?;
+
+        Ok(())
+    }
+}
+
+
+
+#[derive(Debug, thiserror::Error)]
+pub enum YacLockError {
+    #[error(transparent)]
+    IoError(#[from] tokio::io::Error),
+
+    #[error(transparent)]
+    DeserializeError(#[from] toml::de::Error),
+
+    #[error(transparent)]
+    SerializeError(#[from] toml::ser::Error),
 }
 
 
@@ -169,9 +242,10 @@ mod tests {
         const TOML: &str = r#"[package]
 name = "test_prj"
 version = "0.1.0"
+type = "executable"
 
 [dependencies]
-dep = { version = "0.2.0", type = "cmake", location = { path = "../dep" } }
+dep = { version = "0.2.0", path = "../dep" }
 "#;
 
         let result = toml::from_str::<YacToml>(TOML).unwrap();
@@ -180,12 +254,13 @@ dep = { version = "0.2.0", type = "cmake", location = { path = "../dep" } }
             package: Package {
                 name: "test_prj".into(),
                 version: "0.1.0".into(),
+                ty: PackageType::Executable,
             },
             dependencies: HashMap::from([
                 ("dep".into(), Dependency {
                     version: "0.2.0".into(),
-                    location: Location::path("../dep".into()),
-                    r#type: Type::cmake,
+                    location: Location::Path { path: "../dep".into() },
+                    ty: Type::Yac,
                 }),
             ]),
         });

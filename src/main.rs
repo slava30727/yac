@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cli_args = CliArgs::parse();
 
     match cli_args.command {
-        CliCommand::New { name } => new::new(&name).await?,
+        CliCommand::New { name, lib } => new::new(&name, lib).await?,
         CliCommand::Run { release } => run::run(release).await?,
         CliCommand::Build { release } => { build::build(release).await?; },
         CliCommand::Clean => clean::clean().await?,
@@ -54,6 +54,8 @@ enum CliCommand {
     New {
         #[arg(short, long)]
         name: String,
+        #[arg(short, long)]
+        lib: bool,
     },
     Clean,
 }

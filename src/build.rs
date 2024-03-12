@@ -1,13 +1,24 @@
+use path_absolutize::Absolutize;
+
 use crate::dynamic::{Build, Builder, BuilderCreationError, CBuild};
+use crate::prettify::print_aligned;
 use crate::yac_toml::*;
 use crate::update::*;
 use std::{path::{Path, PathBuf}, fs, process::{Command, ExitStatus}, error::Error};
 
 
 
+pub fn print_compiling_message(name: &str, version: &str, path: Option<&str>) -> std::io::Result<()> {
+    let loc = match path {
+        Some(path) => format!(" ({})", path),
+        None => String::new(),
+    };
+
+    print_aligned("Compiling", &format!("{name} v{version}{loc}"))
+}
+
 pub async fn build(release: bool) -> Result<ExitStatus, Box<dyn Error>> {
-    use path_absolutize::Absolutize;
-    use crate::prettify::{print_aligned, error};
+    use crate::prettify::error;
     use std::time::Instant;
 
     const TARGET: &str = "target";
@@ -24,18 +35,6 @@ pub async fn build(release: bool) -> Result<ExitStatus, Box<dyn Error>> {
     if !Path::new(TARGET).exists() {
         fs::create_dir(TARGET)?;
     }
-
-    let src_path = std::env::current_dir()?;
-
-    print_aligned(
-        "Compiling",
-        &format!(
-            "{name} v{version} ({path})",
-            name = yac_toml.package.name,
-            version = yac_toml.package.version,
-            path = src_path.absolutize()?.to_str().unwrap(),
-        ),
-    )?;
 
     let time = Instant::now();
 
@@ -163,17 +162,82 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         return Ok(ExitStatus::default());
     }
 
-    let app_path = cfg.target.join(if cfg.release { "release" } else { "debug" });
+    let yac_lock = if !Path::new("Yac.lock").exists()
+        || !yac_toml_updated().await
+    {
+        let yac_lock = YacLock::linearize_from(cfg.yac_toml, "./")?;
+        yac_lock.write("./").await?;
+        yac_lock
+    } else {
+        YacLock::read("./").await?
+            .expect("Yac.lock should be in current directory")
+    };
+
+    let app_path = cfg.target.join(
+        if cfg.release { "release" } else { "debug" }
+    );
 
     if !app_path.exists() {
         fs::create_dir_all(&app_path)?;
     }
 
-    let _artifacts_dir = app_path.join(&cfg.yac_toml.package.name);
+    let artifacts_dir = app_path.join(&cfg.yac_toml.package.name);
+
+    let handles = yac_lock.package.iter().flat_map(|target| {
+        let Location::Path { ref path } = target.description.location else {
+            todo!("Location::link is not supported yet");
+        };
+
+        let cur_dir = artifacts_dir.join(&target.yac_toml.package.name);
+
+        if cur_dir.exists() {
+            return None;
+        }
+
+        std::fs::create_dir_all(&cur_dir).unwrap();
+
+        print_compiling_message(
+            &target.yac_toml.package.name,
+            &target.yac_toml.package.version,
+            None,
+        ).unwrap();
+
+        Some(
+            Command::new("gcc")
+                .args(WARNING_FLAGS)
+                .arg("-c")
+                .arg(format!("{path}/src/*.c"))
+                .arg(if cfg.release { "-O3" } else { "-g" })
+                .arg("-o")
+                .arg(cur_dir.join("out.lib"))
+                .spawn()
+                .unwrap()
+        )
+    });
+
+    for mut handle in handles {
+        handle.wait()?;
+    }
+
+    let libs = yac_lock.package.iter()
+        .map(|target| {
+            artifacts_dir
+                .join(&target.yac_toml.package.name)
+                .join("out.lib")
+        });
+
+    let src_path = std::env::current_dir()?;
+
+    print_compiling_message(
+        &cfg.yac_toml.package.name,
+        &cfg.yac_toml.package.version,
+        Some(src_path.absolutize()?.to_str().unwrap()),
+    )?;
 
     let status = Command::new("gcc")
         .args(WARNING_FLAGS)
         .arg("src/*.c")
+        .args(libs)
         .arg(if cfg.release { "-O3" } else { "-g" })
         .arg("-o")
         .arg(app_path.join(cfg.executable_name).with_extension("exe"))

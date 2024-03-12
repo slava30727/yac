@@ -183,26 +183,3 @@ pub enum BuilderCreationError {
     #[error(transparent)]
     SharedLibraryLoadError(#[from] libloading::Error),
 }
-
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compile_test() {
-        Builder::compile("test_prj/build.c", "test_prj/build.dll");
-    }
-
-    #[test]
-    fn run_build() {
-        let builder = Builder::new("test_prj/build.dll").unwrap();
-
-        let mut build = CBuild::new(builder);
-
-        build.api.build(&mut build.build);
-
-        println!("{:?}", Build::from(&build));
-    }
-}

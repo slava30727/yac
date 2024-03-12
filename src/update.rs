@@ -43,11 +43,33 @@ pub async fn build_file_updated() -> bool {
     let mut hash = Blake2s256::new();
     let result = get_hash_file(BUILD, &mut hash).unwrap();
 
-    let mut update = YacUpdate::read().await.unwrap_or_default().unwrap_or_default();
+    let mut update = YacUpdate::read().await
+        .unwrap_or_default()
+        .unwrap_or_default();
 
     if update.last_build_error {
         return true;
     }
+
+    let is_updated = update.build_hash != result;
+
+    if is_updated {
+        update.build_hash = result;
+        update.write().await.unwrap();
+    }
+
+    is_updated
+}
+
+pub async fn yac_toml_updated() -> bool {
+    const YAC_TOML: &str = "Yac.toml";
+
+    let mut hash = Blake2s256::new();
+    let result = get_hash_file(YAC_TOML, &mut hash).unwrap();
+
+    let mut update = YacUpdate::read().await
+        .unwrap_or_default()
+        .unwrap_or_default();
 
     let is_updated = update.build_hash != result;
 
@@ -66,6 +88,7 @@ pub struct YacUpdate {
     pub debug_hash: String,
     pub release_hash: String,
     pub build_hash: String,
+    pub yac_toml_hash: String,
     pub last_src_error: bool,
     pub last_build_error: bool,
 }

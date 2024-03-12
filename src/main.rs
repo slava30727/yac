@@ -11,6 +11,7 @@ pub mod run;
 pub mod clean;
 pub mod update;
 pub mod prettify;
+pub mod lsp;
 
 use clap::*;
 use std::error::Error;

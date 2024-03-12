@@ -1,5 +1,5 @@
 use std::{error::Error, path::Path};
-use crate::{prettify::{error, print_aligned}, yac_toml::{PackageType, YacToml}};
+use crate::{lsp::Clangd, prettify::{error, print_aligned}, yac_toml::{PackageType, YacToml}};
 
 
 
@@ -13,14 +13,12 @@ int main(void) {
 }
 "#;
 
-const LIBC_FILE_DEFAULT: &str = r#"#include <yac/lib.h>
-#include <assert.h>
-
-int sum(int a, int b) {
+const LIBC_FILE_DEFAULT: &str = r#"int sum(int a, int b) {
     return a + b;
 }
 
 #ifdef YAC_TEST
+#   include <yac/lib.h>
 
     void YAC_TEST_it_works(void) {
         assert(sum(2, 2) == 4 && "summation failed");
@@ -32,11 +30,6 @@ int sum(int a, int b) {
 const LIBH_FILE_DEFAULT: &str = r"int sum(int a, int b);";
 
 const GITIGNORE_FILE_DEFAULT: &str = "/target\n";
-
-const CLANGD_FILE_DEFAULT: &str = r#"CompileFlags:
-    Add:
-        - "-ID:\\svyatoslav\\programs\\yac\\include"
-"#;
 
 
 
@@ -101,10 +94,12 @@ pub async fn new(name: &str, create_library: bool) -> Result<(), Box<dyn Error>>
         }
     };
 
+    let clangd = serde_yaml::to_string(&Clangd::default())?;
+
     tokio::try_join! {
         tokio::fs::write(prj_dir.join("Yac.toml"), &yac_toml_string),
         tokio::fs::write(prj_dir.join(".gitignore"), GITIGNORE_FILE_DEFAULT),
-        tokio::fs::write(prj_dir.join(".clangd"), CLANGD_FILE_DEFAULT),
+        tokio::fs::write(prj_dir.join(".clangd"), &clangd),
         create_default_source_file,
     }?;
 

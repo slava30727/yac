@@ -1,6 +1,7 @@
 use path_absolutize::Absolutize;
 
 use crate::dynamic::{Build, Builder, BuilderCreationError, CBuild};
+use crate::lsp::Clangd;
 use crate::prettify::print_aligned;
 use crate::yac_toml::*;
 use crate::update::*;
@@ -158,13 +159,9 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         "-Wformat-nonliteral", "-Wformat-security",
     ];
 
-    if !src_files_updated(cfg.release).await {
-        return Ok(ExitStatus::default());
-    }
+    let yac_toml_updated = !yac_toml_updated().await;
 
-    let yac_lock = if !Path::new("Yac.lock").exists()
-        || !yac_toml_updated().await
-    {
+    let yac_lock = if !Path::new("Yac.lock").exists() || yac_toml_updated {
         let yac_lock = YacLock::linearize_from(cfg.yac_toml, "./")?;
         yac_lock.write("./").await?;
         yac_lock
@@ -172,6 +169,30 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         YacLock::read("./").await?
             .expect("Yac.lock should be in current directory")
     };
+
+    let include_flags = cfg.yac_toml.dependencies.values().map(|dependancy| {
+        let Location::Path { ref path } = dependancy.location else {
+            todo!("Location::Link is not supported yet");
+        };
+
+        let include = Path::new(path).join("include");
+        let include = include.absolutize().unwrap();
+
+        format!("-I{}", include.display())
+    }).collect::<Vec<_>>();
+
+    if yac_toml_updated {
+        let mut clangd = Clangd::read("./").await?;
+
+        clangd.compile_flags.add.values.truncate(1);
+        clangd.compile_flags.add.values.extend_from_slice(&include_flags);
+
+        clangd.write("./").await?;
+    }
+
+    if !src_files_updated(cfg.release).await {
+        return Ok(ExitStatus::default());
+    }
 
     let app_path = cfg.target.join(
         if cfg.release { "release" } else { "debug" }
@@ -185,7 +206,7 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
 
     let handles = yac_lock.package.iter().flat_map(|target| {
         let Location::Path { ref path } = target.description.location else {
-            todo!("Location::link is not supported yet");
+            todo!("Location::Link is not supported yet");
         };
 
         let cur_dir = artifacts_dir.join(&target.yac_toml.package.name);
@@ -215,8 +236,14 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         )
     });
 
+    let mut exit_codes = Vec::with_capacity(handles.size_hint().0);
+
     for mut handle in handles {
-        handle.wait()?;
+        exit_codes.push(handle.wait()?);
+    }
+
+    if let Some(&code) = exit_codes.iter().find(|code| !code.success()) {
+        return Ok(code);
     }
 
     let libs = yac_lock.package.iter()
@@ -237,6 +264,7 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
     let status = Command::new("gcc")
         .args(WARNING_FLAGS)
         .arg("src/*.c")
+        .args(&include_flags)
         .args(libs)
         .arg(if cfg.release { "-O3" } else { "-g" })
         .arg("-o")

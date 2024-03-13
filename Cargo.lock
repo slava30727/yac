@@ -1208,6 +1208,7 @@ dependencies = [
  "file-hashing",
  "libloading",
  "path-absolutize",
+ "rayon",
  "relative-path",
  "serde",
  "serde_json",

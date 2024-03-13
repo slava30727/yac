@@ -7,7 +7,7 @@ pub const YAC_INCLUDE_PATH: &str = r"D:\Svyatoslav\Programs\yac\include";
 
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Clangd {
     pub compile_flags: CompileFlags,
@@ -25,8 +25,18 @@ impl Clangd {
     }
 
     pub async fn write(&self, location: impl AsRef<Path>) -> Result<(), ClangdError> {
+        let path = location.as_ref().join(".clangd");
+
+        if self.is_empty() {
+            if path.exists() {
+                tokio::fs::remove_file(&path).await?;
+            }
+
+            return Ok(());
+        }
+
         tokio::fs::write(
-            location.as_ref().join(".clangd"),
+            &path,
             &serde_yaml::to_string(self)?
         ).await?;
 
@@ -38,17 +48,9 @@ impl Clangd {
             format!("-I{}", path.as_ref().display()),
         );
     }
-}
 
-impl Default for Clangd {
-    fn default() -> Self {
-        Self {
-            compile_flags: CompileFlags {
-                add: Add {
-                    values: vec![format!("-I{}", YAC_INCLUDE_PATH)],
-                },
-            },
-        }
+    pub fn is_empty(&self) -> bool {
+        self.compile_flags.add.values.is_empty()
     }
 }
 
@@ -72,9 +74,15 @@ pub struct Add<T> {
     pub values: Vec<T>,
 }
 
+impl<T> Default for Add<T> {
+    fn default() -> Self {
+        Self { values: vec![] }
+    }
+}
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CompileFlags {
     pub add: Add<String>,
@@ -93,6 +101,9 @@ mod tests {
 
     #[test]
     fn de() {
+        let mut src = Clangd::default();
+        src.add_include_path(YAC_INCLUDE_PATH);
+
         let clangd = serde_yaml::from_str::<Clangd>(CLANGD).unwrap();
 
         assert_eq!(clangd, Clangd::default());
@@ -100,7 +111,10 @@ mod tests {
 
     #[test]
     fn ser() {
-        let clangd = serde_yaml::to_string(&Clangd::default()).unwrap();
+        let mut src = Clangd::default();
+        src.add_include_path(YAC_INCLUDE_PATH);
+
+        let clangd = serde_yaml::to_string(&src).unwrap();
 
         eprintln!("{clangd}");
 

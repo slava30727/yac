@@ -1,5 +1,5 @@
 use std::{error::Error, path::Path};
-use crate::{lsp::Clangd, prettify::{error, print_aligned}, yac_toml::{PackageType, YacToml}};
+use crate::{prettify::{error, print_aligned}, yac_toml::{PackageType, YacToml}};
 
 
 
@@ -94,12 +94,9 @@ pub async fn new(name: &str, create_library: bool) -> Result<(), Box<dyn Error>>
         }
     };
 
-    let clangd = serde_yaml::to_string(&Clangd::default())?;
-
     tokio::try_join! {
         tokio::fs::write(prj_dir.join("Yac.toml"), &yac_toml_string),
         tokio::fs::write(prj_dir.join(".gitignore"), GITIGNORE_FILE_DEFAULT),
-        tokio::fs::write(prj_dir.join(".clangd"), &clangd),
         create_default_source_file,
     }?;
 

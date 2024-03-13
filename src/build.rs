@@ -1,11 +1,13 @@
 use path_absolutize::Absolutize;
 
 use crate::dynamic::{Build, Builder, BuilderCreationError, CBuild};
-use crate::lsp::Clangd;
+use crate::lsp::{Clangd, YAC_INCLUDE_PATH};
 use crate::prettify::print_aligned;
 use crate::yac_toml::*;
 use crate::update::*;
+use std::io::Write;
 use std::{path::{Path, PathBuf}, fs, process::{Command, ExitStatus}, error::Error};
+use rayon::prelude::*;
 
 
 
@@ -153,12 +155,12 @@ impl<'toml> BuildCfg<'toml> {
     }
 }
 
-async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
-    const WARNING_FLAGS: &[&str] = &[
-        "-Wall", "-Wextra", "-Wdouble-promotion", "-Wformat-overflow=2",
-        "-Wformat-nonliteral", "-Wformat-security",
-    ];
+const WARNING_FLAGS: &[&str] = &[
+    "-Wall", "-Wextra", "-Wdouble-promotion", "-Wformat-overflow=2",
+    "-Wformat-nonliteral", "-Wformat-security",
+];
 
+async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
     let yac_toml_updated = !yac_toml_updated().await;
 
     let yac_lock = if !Path::new("Yac.lock").exists() || yac_toml_updated {
@@ -181,10 +183,15 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         format!("-I{}", include.display())
     }).collect::<Vec<_>>();
 
-    if yac_toml_updated {
-        let mut clangd = Clangd::read("./").await?;
+    if yac_toml_updated || build_file_updated().await {
+        let mut clangd = Clangd::read("./").await.unwrap_or_default();
 
-        clangd.compile_flags.add.values.truncate(1);
+        clangd.compile_flags.add.values.clear();
+
+        if Path::new("build.c").exists() {
+            clangd.add_include_path(YAC_INCLUDE_PATH);
+        }
+
         clangd.compile_flags.add.values.extend_from_slice(&include_flags);
 
         clangd.write("./").await?;
@@ -204,45 +211,12 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
 
     let artifacts_dir = app_path.join(&cfg.yac_toml.package.name);
 
-    let handles = yac_lock.package.iter().flat_map(|target| {
-        let Location::Path { ref path } = target.description.location else {
-            todo!("Location::Link is not supported yet");
-        };
+    let dependancy_out
+        = build_dependencies(&yac_lock.package, &artifacts_dir, &cfg);
 
-        let cur_dir = artifacts_dir.join(&target.yac_toml.package.name);
+    std::io::stderr().write_all(&dependancy_out.stderr)?;
 
-        if cur_dir.exists() {
-            return None;
-        }
-
-        std::fs::create_dir_all(&cur_dir).unwrap();
-
-        print_compiling_message(
-            &target.yac_toml.package.name,
-            &target.yac_toml.package.version,
-            None,
-        ).unwrap();
-
-        Some(
-            Command::new("gcc")
-                .args(WARNING_FLAGS)
-                .arg("-c")
-                .arg(format!("{path}/src/*.c"))
-                .arg(if cfg.release { "-O3" } else { "-g" })
-                .arg("-o")
-                .arg(cur_dir.join("out.lib"))
-                .spawn()
-                .unwrap()
-        )
-    });
-
-    let mut exit_codes = Vec::with_capacity(handles.size_hint().0);
-
-    for mut handle in handles {
-        exit_codes.push(handle.wait()?);
-    }
-
-    if let Some(&code) = exit_codes.iter().find(|code| !code.success()) {
+    if let Some(&code) = dependancy_out.exit_codes.iter().find(|code| !code.success()) {
         return Ok(code);
     }
 
@@ -250,7 +224,7 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         .map(|target| {
             artifacts_dir
                 .join(&target.yac_toml.package.name)
-                .join("out.lib")
+                .join("*.o")
         });
 
     let src_path = std::env::current_dir()?;
@@ -273,4 +247,98 @@ async fn run_build(cfg: BuildCfg<'_>) -> Result<ExitStatus, Box<dyn Error>> {
         .wait()?;
 
     Ok(status)
+}
+
+
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependacyBuildOutput {
+    pub stderr: Vec<u8>,
+    pub exit_codes: Vec<ExitStatus>,
+}
+
+impl std::fmt::Display for DependacyBuildOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(std::str::from_utf8(&self.stderr).unwrap())
+    }
+}
+
+
+
+/// TODO: run dependancies build scripts
+pub fn build_dependencies<'t>(
+    targets: impl IntoIterator<Item = &'t Target>,
+    artifacts_dir: impl AsRef<Path>,
+    cfg: &BuildCfg<'_>,
+) -> DependacyBuildOutput {
+    let artifacts_dir = artifacts_dir.as_ref();
+
+    let commands = targets.into_iter().flat_map(|target| {
+        let Location::Path { ref path } = target.description.location else {
+            todo!("Location::Link is not supported yet");
+        };
+
+        let cur_dir = artifacts_dir.join(&target.yac_toml.package.name);
+
+        if cur_dir.exists() {
+            return None;
+        }
+
+        std::fs::create_dir_all(&cur_dir).unwrap();
+
+        print_compiling_message(
+            &target.yac_toml.package.name,
+            &target.yac_toml.package.version,
+            None,
+        ).unwrap();
+
+        let mut commands = vec![];
+
+        for dir in walkdir::WalkDir::new(Path::new(path).join("src")).into_iter().flatten() {
+            use std::ffi::OsStr;
+
+            let Some(extension) = dir.path().extension() else { continue };
+
+            if extension != OsStr::new("c") {
+                continue;
+            }
+
+            let out_name = dir.path().to_str().unwrap().replace(['/', '\\', '.'], "_");
+
+            let mut command = Command::new("gcc");
+
+            command
+                .args(WARNING_FLAGS)
+                .arg("-c")
+                .arg(dir.path())
+                .arg(if cfg.release { "-O3" } else { "-g" })
+                .arg("-o")
+                .arg(cur_dir.join(&out_name).with_extension("o"))
+                .stdout(std::process::Stdio::piped());
+
+            commands.push((cur_dir.clone(), command));
+        }
+
+        Some(commands)
+    }).flatten().collect::<Vec<_>>();
+    
+    let mut handles = Vec::with_capacity(commands.len());
+
+    commands.into_par_iter()
+        .map(|(path, mut command)| (path, command.output().unwrap()))
+        .collect_into_vec(&mut handles);
+
+    let mut exit_codes = Vec::with_capacity(handles.len());
+    let mut stderr = Vec::with_capacity(handles.len());
+
+    for (path, mut output) in handles {
+        if path.exists() && !output.status.success() {
+            std::fs::remove_dir_all(&path).unwrap();
+        }
+
+        exit_codes.push(output.status);
+        stderr.append(&mut output.stderr);
+    }
+
+    DependacyBuildOutput { stderr, exit_codes }
 }

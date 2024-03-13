@@ -1,4 +1,4 @@
-use std::{error::Error, process::Command};
+use std::error::Error;
 use crate::{yac_toml::YacToml, prettify::{print_aligned, error}};
 
 
@@ -14,10 +14,10 @@ pub async fn clean() -> Result<(), Box<dyn Error>> {
 
     print_aligned("Cleaning", &format!("package `{}`'s artifacts", yac_toml.package.name))?;
 
-    Command::new("rm")
-        .args(["-rf", "target"])
-        .spawn()?
-        .wait()?;
+    tokio::try_join!(
+        tokio::fs::remove_dir_all("target"),
+        tokio::fs::remove_file("Yac.lock"),
+    )?;
 
     Ok(())
 }

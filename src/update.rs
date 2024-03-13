@@ -40,12 +40,20 @@ pub async fn src_files_updated(release: bool) -> bool {
 pub async fn build_file_updated() -> bool {
     const BUILD: &str = "build.c";
 
-    let mut hash = Blake2s256::new();
-    let result = get_hash_file(BUILD, &mut hash).unwrap();
-
     let mut update = YacUpdate::read().await
         .unwrap_or_default()
         .unwrap_or_default();
+
+    // not (no build ^ hash is not empty) = !(true ^ true) = true
+    // not (no build ^ hash is empty) = !(true ^ false) = false
+    // not (build exists ^ hash is not empty) = !(false ^ true) = false
+    // not (biuld exists ^ hash is empty) = !(false ^ false) = true
+    if !(Path::new(BUILD).exists() ^ update.build_hash.is_empty()) {
+        return true;
+    }
+
+    let mut hash = Blake2s256::new();
+    let result = get_hash_file(BUILD, &mut hash).unwrap();
 
     if update.last_build_error {
         return true;
